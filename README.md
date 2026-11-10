@@ -28,5 +28,6 @@ The API is documented at <http://localhost:8000/docs>.
 - Ingredient-level “Count sugar as added” classification; daily sugar-limit progress counts only sugar from classified ingredients, while total sugar remains visible in meal nutrition.
 - Recipe quick-load and save-as-recipe workflow.
 - Snapshot-based historical logging, deletion, and one-tap duplication to the other user.
+- Weekly status reports with goal comparisons and a date-range foods-eaten report with PDF and CSV export.
 - Persistent SQLite schema with foreign keys and Docker volume storage.
 

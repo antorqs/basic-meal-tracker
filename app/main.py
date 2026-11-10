@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from datetime import date as date_type
+from datetime import date as date_type, timedelta
 import hashlib
 import json
 import os
@@ -220,6 +220,203 @@ def summary(user_id, day):
 @app.get("/api/summary")
 def get_summary(user_id: int = 1, date: str | None = None):
     return summary(user_id, date or str(date_type.today()))
+
+
+REPORT_METRICS = ("calories", "protein", "carbs", "fat", "added_sugar")
+REPORT_TARGET_COLUMNS = {
+    "calories": "target_calories",
+    "protein": "target_protein",
+    "carbs": "target_carbs",
+    "fat": "target_fat",
+    "added_sugar": "target_sugar",
+}
+REPORT_DEFAULT_TARGETS = {
+    "target_calories": 2000,
+    "target_protein": 140,
+    "target_carbs": 0,
+    "target_sugar": 0,
+    "target_fat": 0,
+}
+
+
+def parse_report_date(value, field_name):
+    try:
+        parsed = date_type.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"{field_name} must be a valid YYYY-MM-DD date")
+    if parsed.isoformat() != value:
+        raise HTTPException(400, f"{field_name} must be a valid YYYY-MM-DD date")
+    return parsed
+
+
+def report_user(user_id):
+    user = rows("SELECT id,name FROM users WHERE id=?", (user_id,))
+    if not user:
+        raise HTTPException(404, "User not found")
+    return user[0]
+
+
+def report_days(user_id, start, end):
+    dates = []
+    current = start
+    while current <= end:
+        dates.append(current.isoformat())
+        current += timedelta(days=1)
+
+    daily = {
+        day: {
+            "date": day,
+            "has_logs": False,
+            "values": {metric: 0.0 for metric in REPORT_METRICS},
+            "goals": {},
+            "progress_percent": {},
+            "leaders": {},
+        }
+        for day in dates
+    }
+    logs = rows(
+        "SELECT id,date,meal_type,total_calories,total_protein,total_carbs,total_fat "
+        "FROM daily_logs WHERE user_id=? AND date>=? AND date<=? ORDER BY date,id",
+        (user_id, dates[0], dates[-1]),
+    ) if dates else []
+    for log in logs:
+        item = daily[log["date"]]
+        item["has_logs"] = True
+        for metric in ("calories", "protein", "carbs", "fat"):
+            item["values"][metric] += log[f"total_{metric}"]
+
+    leaders_by_day = {day: {} for day in dates}
+    if logs:
+        item_rows = rows(
+            "SELECT dl.date,dl.meal_type,dli.ingredient_name,dli.weight,dli.calories,"
+            "dli.protein,dli.carbs,dli.fat,dli.sugar,dli.counts_as_added_sugar "
+            "FROM daily_log_items dli JOIN daily_logs dl ON dl.id=dli.daily_log_id "
+            "WHERE dl.user_id=? AND dl.date>=? AND dl.date<=? ORDER BY dl.date,dl.id,dli.id",
+            (user_id, dates[0], dates[-1]),
+        )
+        for row in item_rows:
+            item = daily[row["date"]]
+            if row["counts_as_added_sugar"]:
+                item["values"]["added_sugar"] += row["sugar"]
+            name_key = row["ingredient_name"].strip().casefold()
+            ingredient = leaders_by_day[row["date"]].setdefault(
+                name_key,
+                {
+                    "ingredient": row["ingredient_name"],
+                    "grams": 0.0,
+                    "values": {metric: 0.0 for metric in REPORT_METRICS},
+                    "meals": set(),
+                },
+            )
+            ingredient["grams"] += row["weight"]
+            ingredient["meals"].add(row["meal_type"])
+            for metric in ("calories", "protein", "carbs", "fat"):
+                ingredient["values"][metric] += row[metric]
+            if row["counts_as_added_sugar"]:
+                ingredient["values"]["added_sugar"] += row["sugar"]
+
+    targets = rows(
+        "SELECT effective_date,target_calories,target_protein,target_carbs,target_sugar,target_fat "
+        "FROM user_targets WHERE user_id=? AND effective_date<=? ORDER BY effective_date",
+        (user_id, dates[-1]),
+    ) if dates else []
+    active_target = REPORT_DEFAULT_TARGETS.copy()
+    target_index = 0
+    for day in dates:
+        while target_index < len(targets) and targets[target_index]["effective_date"] <= day:
+            active_target = targets[target_index]
+            target_index += 1
+        item = daily[day]
+        item["goals"] = {
+            metric: active_target[REPORT_TARGET_COLUMNS[metric]] for metric in REPORT_METRICS
+        }
+        item["progress_percent"] = {
+            metric: (item["values"][metric] / item["goals"][metric] * 100)
+            if item["goals"][metric] > 0 else None
+            for metric in REPORT_METRICS
+        }
+        day_ingredients = leaders_by_day[day]
+        for metric in REPORT_METRICS:
+            maximum = max((entry["values"][metric] for entry in day_ingredients.values()), default=0)
+            if maximum <= 0:
+                item["leaders"][metric] = []
+                continue
+            item["leaders"][metric] = [
+                {
+                    "ingredient": entry["ingredient"],
+                    "grams": entry["grams"],
+                    "value": entry["values"][metric],
+                    "meals": sorted(entry["meals"]),
+                }
+                for entry in day_ingredients.values()
+                if abs(entry["values"][metric] - maximum) <= max(1e-9, abs(maximum) * 1e-9)
+            ]
+    return daily
+
+
+def report_window(start, end, daily):
+    dates = []
+    current = start
+    while current <= end:
+        dates.append(current.isoformat())
+        current += timedelta(days=1)
+    included = [daily[day] for day in dates if daily[day]["has_logs"]]
+    count = len(included)
+    averages = {
+        "logged_days": count,
+        "values": {
+            metric: sum(item["values"][metric] for item in included) / count if count else None
+            for metric in REPORT_METRICS
+        },
+        "goals": {
+            metric: sum(item["goals"][metric] for item in included) / count if count else None
+            for metric in REPORT_METRICS
+        },
+    }
+    return {
+        "start_date": dates[0] if dates else None,
+        "end_date": dates[-1] if dates else None,
+        "days": [daily[day] for day in dates],
+        "averages": averages,
+    }
+
+
+@app.get("/api/reports/weekly")
+def weekly_report(user_id: int = Query(...), as_of: str = Query(...)):
+    anchor = parse_report_date(as_of, "as_of")
+    user = report_user(user_id)
+    last_seven_start = anchor - timedelta(days=6)
+    week_start = anchor - timedelta(days=anchor.weekday())
+    daily = report_days(user_id, min(last_seven_start, week_start), anchor)
+    return {
+        "user": user,
+        "as_of": anchor.isoformat(),
+        "last_7_days": report_window(last_seven_start, anchor, daily),
+        "current_week": report_window(week_start, anchor, daily),
+    }
+
+
+@app.get("/api/reports/foods")
+def foods_report(
+    user_id: int = Query(...),
+    from_date: str = Query(..., alias="from"),
+    to_date: str = Query(..., alias="to"),
+):
+    start = parse_report_date(from_date, "from")
+    end = parse_report_date(to_date, "to")
+    if start > end:
+        raise HTTPException(400, "from must be on or before to")
+    user = report_user(user_id)
+    items = rows(
+        "SELECT dl.date,dl.meal_type,dli.ingredient_name,dli.weight,dli.calories,"
+        "dli.protein,dli.fat,dli.carbs,dli.sugar,dli.counts_as_added_sugar "
+        "FROM daily_log_items dli JOIN daily_logs dl ON dl.id=dli.daily_log_id "
+        "WHERE dl.user_id=? AND dl.date>=? AND dl.date<=? ORDER BY dl.date,dl.id,dli.id",
+        (user_id, start.isoformat(), end.isoformat()),
+    )
+    for item in items:
+        item["counts_as_added_sugar"] = bool(item["counts_as_added_sugar"])
+    return {"user": user, "from": start.isoformat(), "to": end.isoformat(), "items": items}
 
 
 @app.post("/api/logs")
