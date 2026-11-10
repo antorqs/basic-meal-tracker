@@ -475,13 +475,21 @@ def build_recalculation(db, user_id, day):
         ingredient = db.execute("SELECT * FROM ingredients WHERE lower(trim(name))=lower(trim(?)) ORDER BY id LIMIT 1", (item["ingredient_name"],)).fetchone()
         if ingredient is None:
             skipped.append({"item_id": item["id"], "ingredient_name": item["ingredient_name"]})
-            fingerprint_rows.append([item[k] for k in ("id", "daily_log_id", "ingredient_name", "weight", *NUTRIENTS)])
+            fingerprint_rows.append([item[k] for k in ("id", "daily_log_id", "ingredient_name", "weight", *NUTRIENTS, "counts_as_added_sugar")])
             continue
         nutrient_values = {key: ingredient[f"{key}_per_100g"] * item["weight"] / 100 for key in NUTRIENTS}
-        proposal = {"item_id": item["id"], "daily_log_id": item["daily_log_id"], **nutrient_values}
+        proposal = {
+            "item_id": item["id"],
+            "daily_log_id": item["daily_log_id"],
+            "counts_as_added_sugar": ingredient["counts_as_added_sugar"],
+            **nutrient_values,
+        }
         proposals.append(proposal)
         matched.append(proposal)
-        fingerprint_rows.append([item[k] for k in ("id", "daily_log_id", "ingredient_name", "weight", *NUTRIENTS)] + [ingredient[k] for k in ("id", "name", *(f"{n}_per_100g" for n in NUTRIENTS))])
+        fingerprint_rows.append(
+            [item[k] for k in ("id", "daily_log_id", "ingredient_name", "weight", *NUTRIENTS, "counts_as_added_sugar")]
+            + [ingredient[k] for k in ("id", "name", *(f"{n}_per_100g" for n in NUTRIENTS), "counts_as_added_sugar")]
+        )
 
     before = {key: sum(log[f"total_{key}"] for log in logs) for key in NUTRIENTS}
     by_log = {log_id: {key: 0.0 for key in NUTRIENTS} for log_id in log_ids}
@@ -513,7 +521,10 @@ def recalculate_confirm(user_id: int, payload: RecalculateConfirm, date: str = Q
         if result["fingerprint"] != payload.fingerprint:
             raise HTTPException(409, "The day changed after the preview. Refresh the preview before confirming.")
         for proposal in result["proposals"]:
-            db.execute("UPDATE daily_log_items SET calories=?,protein=?,carbs=?,sugar=?,fat=? WHERE id=?", (*(proposal[key] for key in NUTRIENTS), proposal["item_id"]))
+            db.execute(
+                "UPDATE daily_log_items SET calories=?,protein=?,carbs=?,sugar=?,fat=?,counts_as_added_sugar=? WHERE id=?",
+                (*(proposal[key] for key in NUTRIENTS), proposal["counts_as_added_sugar"], proposal["item_id"]),
+            )
         for log_id, totals in result["log_totals"].items():
             db.execute("UPDATE daily_logs SET total_calories=?,total_protein=?,total_carbs=?,total_sugar=?,total_fat=? WHERE id=?", (*(totals[key] for key in NUTRIENTS), log_id))
     return {"date": date, "updated_count": result["matched_count"], "skipped_count": result["skipped_count"], "skipped": result["skipped"], "totals": result["after"]}

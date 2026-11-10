@@ -62,6 +62,13 @@ class ReportsTests(unittest.TestCase):
                 ],
             )
 
+    def add_ingredient(self, name, sugar_per_100g, counts_as_added_sugar):
+        with tracker.connect() as db:
+            db.execute(
+                "INSERT INTO ingredients(name,sugar_per_100g,counts_as_added_sugar) VALUES (?,?,?)",
+                (name, sugar_per_100g, int(counts_as_added_sugar)),
+            )
+
     def test_weekly_windows_use_monday_and_rolling_seven_day_ranges(self):
         self.add_target("2026-11-01", calories=2000)
         self.add_target("2026-11-10", calories=2200)
@@ -133,6 +140,45 @@ class ReportsTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["ingredient_name"], "Honey, raw")
         self.assertEqual(result["items"][0]["sugar"], 12)
         self.assertTrue(result["items"][0]["counts_as_added_sugar"])
+
+    def test_recalculation_syncs_added_sugar_from_master_and_foods_report(self):
+        self.add_ingredient("Honey", sugar_per_100g=80, counts_as_added_sugar=True)
+        self.add_log(
+            "2026-11-10",
+            "Breakfast",
+            [
+                {"name": "Honey", "weight": 20, "sugar": 5, "counts_as_added_sugar": False},
+                {"name": "Unmatched food", "weight": 10, "sugar": 2, "counts_as_added_sugar": False},
+            ],
+        )
+
+        preview = tracker.recalculate_preview(user_id=1, date="2026-11-10")
+        tracker.recalculate_confirm(
+            user_id=1,
+            payload=tracker.RecalculateConfirm(fingerprint=preview["fingerprint"]),
+            date="2026-11-10",
+        )
+        report = tracker.foods_report(user_id=1, from_date="2026-11-10", to_date="2026-11-10")
+
+        self.assertTrue(report["items"][0]["counts_as_added_sugar"])
+        self.assertEqual(report["items"][0]["sugar"], 16)
+        self.assertFalse(report["items"][1]["counts_as_added_sugar"])
+
+    def test_recalculation_rejects_preview_when_master_sugar_classification_changes(self):
+        self.add_ingredient("Honey", sugar_per_100g=80, counts_as_added_sugar=False)
+        self.add_log("2026-11-10", "Breakfast", [{"name": "Honey", "weight": 20, "sugar": 5}])
+        preview = tracker.recalculate_preview(user_id=1, date="2026-11-10")
+        with tracker.connect() as db:
+            db.execute("UPDATE ingredients SET counts_as_added_sugar=1 WHERE name='Honey'")
+
+        with self.assertRaises(HTTPException) as stale_preview:
+            tracker.recalculate_confirm(
+                user_id=1,
+                payload=tracker.RecalculateConfirm(fingerprint=preview["fingerprint"]),
+                date="2026-11-10",
+            )
+
+        self.assertEqual(stale_preview.exception.status_code, 409)
 
     def test_invalid_range_and_unknown_user_return_http_errors(self):
         with self.assertRaises(HTTPException) as invalid_range:
