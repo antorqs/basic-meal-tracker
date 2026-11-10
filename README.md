@@ -25,6 +25,7 @@ The API is documented at <http://localhost:8000/docs>.
 
 - Seeded two-user switcher, date navigation, calorie/protein targets, remaining progress, and grouped daily meal feed.
 - Ingredient autocomplete with live weight-based nutrition calculation.
+- Ingredient-level “Count sugar as added” classification; daily sugar-limit progress counts only sugar from classified ingredients, while total sugar remains visible in meal nutrition.
 - Recipe quick-load and save-as-recipe workflow.
 - Snapshot-based historical logging, deletion, and one-tap duplication to the other user.
 - Persistent SQLite schema with foreign keys and Docker volume storage.

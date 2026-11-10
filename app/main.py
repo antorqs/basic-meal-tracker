@@ -28,18 +28,18 @@ def init_db():
         db.executescript("""
         CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, target_calories INTEGER NOT NULL DEFAULT 2000, target_protein INTEGER NOT NULL DEFAULT 140);
         CREATE TABLE IF NOT EXISTS user_targets (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, effective_date TEXT NOT NULL, target_calories INTEGER NOT NULL DEFAULT 0, target_protein INTEGER NOT NULL DEFAULT 0, target_carbs REAL NOT NULL DEFAULT 0, target_sugar REAL NOT NULL DEFAULT 0, target_fat REAL NOT NULL DEFAULT 0, UNIQUE(user_id, effective_date));
-        CREATE TABLE IF NOT EXISTS ingredients (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, calories_per_100g REAL NOT NULL DEFAULT 0, protein_per_100g REAL NOT NULL DEFAULT 0, carbs_per_100g REAL NOT NULL DEFAULT 0, sugar_per_100g REAL NOT NULL DEFAULT 0, fat_per_100g REAL NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS ingredients (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL, calories_per_100g REAL NOT NULL DEFAULT 0, protein_per_100g REAL NOT NULL DEFAULT 0, carbs_per_100g REAL NOT NULL DEFAULT 0, sugar_per_100g REAL NOT NULL DEFAULT 0, fat_per_100g REAL NOT NULL DEFAULT 0, counts_as_added_sugar INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS meals (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS meal_items (id INTEGER PRIMARY KEY, meal_id INTEGER NOT NULL REFERENCES meals(id) ON DELETE CASCADE, ingredient_id INTEGER NOT NULL REFERENCES ingredients(id), default_weight REAL NOT NULL);
         CREATE TABLE IF NOT EXISTS daily_logs (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, date TEXT NOT NULL, meal_type TEXT NOT NULL, total_calories REAL NOT NULL DEFAULT 0, total_protein REAL NOT NULL DEFAULT 0, total_carbs REAL NOT NULL DEFAULT 0, total_sugar REAL NOT NULL DEFAULT 0, total_fat REAL NOT NULL DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS daily_log_items (id INTEGER PRIMARY KEY, daily_log_id INTEGER NOT NULL REFERENCES daily_logs(id) ON DELETE CASCADE, ingredient_name TEXT NOT NULL, weight REAL NOT NULL, calories REAL NOT NULL DEFAULT 0, protein REAL NOT NULL DEFAULT 0, carbs REAL NOT NULL DEFAULT 0, sugar REAL NOT NULL DEFAULT 0, fat REAL NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS daily_log_items (id INTEGER PRIMARY KEY, daily_log_id INTEGER NOT NULL REFERENCES daily_logs(id) ON DELETE CASCADE, ingredient_name TEXT NOT NULL, weight REAL NOT NULL, calories REAL NOT NULL DEFAULT 0, protein REAL NOT NULL DEFAULT 0, carbs REAL NOT NULL DEFAULT 0, sugar REAL NOT NULL DEFAULT 0, fat REAL NOT NULL DEFAULT 0, counts_as_added_sugar INTEGER NOT NULL DEFAULT 0);
         """)
         migrations = {
             "users": {"show_extended_nutrients": "INTEGER NOT NULL DEFAULT 0"},
             "user_targets": {"target_carbs": "REAL NOT NULL DEFAULT 0", "target_sugar": "REAL NOT NULL DEFAULT 0", "target_fat": "REAL NOT NULL DEFAULT 0"},
-            "ingredients": {"carbs_per_100g": "REAL NOT NULL DEFAULT 0", "sugar_per_100g": "REAL NOT NULL DEFAULT 0", "fat_per_100g": "REAL NOT NULL DEFAULT 0"},
+            "ingredients": {"carbs_per_100g": "REAL NOT NULL DEFAULT 0", "sugar_per_100g": "REAL NOT NULL DEFAULT 0", "fat_per_100g": "REAL NOT NULL DEFAULT 0", "counts_as_added_sugar": "INTEGER NOT NULL DEFAULT 0"},
             "daily_logs": {"total_carbs": "REAL NOT NULL DEFAULT 0", "total_sugar": "REAL NOT NULL DEFAULT 0", "total_fat": "REAL NOT NULL DEFAULT 0"},
-            "daily_log_items": {"carbs": "REAL NOT NULL DEFAULT 0", "sugar": "REAL NOT NULL DEFAULT 0", "fat": "REAL NOT NULL DEFAULT 0"},
+            "daily_log_items": {"carbs": "REAL NOT NULL DEFAULT 0", "sugar": "REAL NOT NULL DEFAULT 0", "fat": "REAL NOT NULL DEFAULT 0", "counts_as_added_sugar": "INTEGER NOT NULL DEFAULT 0"},
         }
         for table, columns in migrations.items():
             existing = {row["name"] for row in db.execute(f"PRAGMA table_info({table})")}
@@ -73,6 +73,7 @@ class IngredientIn(BaseModel):
     carbs_per_100g: float = Field(default=0, ge=0)
     sugar_per_100g: float = Field(default=0, ge=0)
     fat_per_100g: float = Field(default=0, ge=0)
+    counts_as_added_sugar: bool = False
 
 
 class ItemIn(BaseModel):
@@ -88,6 +89,7 @@ class ItemIn(BaseModel):
     carbs_per_100g: float = Field(default=0, ge=0)
     sugar_per_100g: float = Field(default=0, ge=0)
     fat_per_100g: float = Field(default=0, ge=0)
+    counts_as_added_sugar: bool = False
 
 
 class MealIn(BaseModel):
@@ -162,7 +164,7 @@ def ingredients(q: str = Query("")):
 def create_ingredient(payload: IngredientIn):
     try:
         with connect() as db:
-            cur = db.execute("INSERT INTO ingredients(name,calories_per_100g,protein_per_100g,carbs_per_100g,sugar_per_100g,fat_per_100g) VALUES (?,?,?,?,?,?)", (payload.name, payload.calories_per_100g, payload.protein_per_100g, payload.carbs_per_100g, payload.sugar_per_100g, payload.fat_per_100g))
+            cur = db.execute("INSERT INTO ingredients(name,calories_per_100g,protein_per_100g,carbs_per_100g,sugar_per_100g,fat_per_100g,counts_as_added_sugar) VALUES (?,?,?,?,?,?,?)", (payload.name, payload.calories_per_100g, payload.protein_per_100g, payload.carbs_per_100g, payload.sugar_per_100g, payload.fat_per_100g, int(payload.counts_as_added_sugar)))
             return {"id": cur.lastrowid, **payload.model_dump()}
     except sqlite3.IntegrityError: raise HTTPException(409, "Ingredient already exists")
 
@@ -172,7 +174,7 @@ def update_ingredient(ingredient_id: int, payload: IngredientIn):
     try:
         with connect() as db:
             if not db.execute("SELECT 1 FROM ingredients WHERE id=?", (ingredient_id,)).fetchone(): raise HTTPException(404, "Ingredient not found")
-            db.execute("UPDATE ingredients SET name=?,calories_per_100g=?,protein_per_100g=?,carbs_per_100g=?,sugar_per_100g=?,fat_per_100g=? WHERE id=?", (payload.name, payload.calories_per_100g, payload.protein_per_100g, payload.carbs_per_100g, payload.sugar_per_100g, payload.fat_per_100g, ingredient_id))
+            db.execute("UPDATE ingredients SET name=?,calories_per_100g=?,protein_per_100g=?,carbs_per_100g=?,sugar_per_100g=?,fat_per_100g=?,counts_as_added_sugar=? WHERE id=?", (payload.name, payload.calories_per_100g, payload.protein_per_100g, payload.carbs_per_100g, payload.sugar_per_100g, payload.fat_per_100g, int(payload.counts_as_added_sugar), ingredient_id))
     except sqlite3.IntegrityError: raise HTTPException(409, "Ingredient name already exists")
     return {"id": ingredient_id, **payload.model_dump()}
 
@@ -203,12 +205,16 @@ def summary(user_id, day):
     logs = rows("SELECT * FROM daily_logs WHERE user_id=? AND date=? ORDER BY id", (user_id, day))
     for log in logs: log["items"] = rows("SELECT * FROM daily_log_items WHERE daily_log_id=? ORDER BY id", (log["id"],))
     consumed = {key: sum(x[f"total_{key}"] for x in logs) for key in ("calories", "protein", "carbs", "sugar", "fat")}
+    added_sugar = sum(item["sugar"] for log in logs for item in log["items"] if item["counts_as_added_sugar"])
     u = user[0]
     target = rows("SELECT target_calories,target_protein,target_carbs,target_sugar,target_fat,effective_date FROM user_targets WHERE user_id=? AND effective_date<=? ORDER BY effective_date DESC LIMIT 1", (user_id, day))
     active = target[0] if target else {"target_calories": 2000, "target_protein": 140, "target_carbs": 0, "target_sugar": 0, "target_fat": 0, "effective_date": None}
     u.update(active)
     targets = {key: active[f"target_{key}"] for key in consumed}
-    return {"user": u, "date": day, "consumed": consumed, "targets": targets, "remaining": {key: max(0, targets[key] - consumed[key]) for key in consumed}, "logs": logs}
+    remaining = {key: max(0, targets[key] - consumed[key]) for key in consumed}
+    remaining["sugar"] = max(0, targets["sugar"] - added_sugar)
+    consumed["added_sugar"] = added_sugar
+    return {"user": u, "date": day, "consumed": consumed, "targets": targets, "remaining": remaining, "logs": logs}
 
 
 @app.get("/api/summary")
@@ -222,7 +228,7 @@ def create_log(payload: LogIn):
     totals = {key: sum(getattr(i, key) for i in payload.items) for key in ("calories", "protein", "carbs", "sugar", "fat")}
     with connect() as db:
         cur = db.execute("INSERT INTO daily_logs(user_id,date,meal_type,total_calories,total_protein,total_carbs,total_sugar,total_fat) VALUES (?,?,?,?,?,?,?,?)", (payload.user_id, payload.date, payload.meal_type, *(totals[k] for k in ("calories", "protein", "carbs", "sugar", "fat")))); log_id = cur.lastrowid
-        db.executemany("INSERT INTO daily_log_items(daily_log_id,ingredient_name,weight,calories,protein,carbs,sugar,fat) VALUES (?,?,?,?,?,?,?,?)", [(log_id, i.name, i.weight, *(getattr(i, k) for k in ("calories", "protein", "carbs", "sugar", "fat"))) for i in payload.items])
+        db.executemany("INSERT INTO daily_log_items(daily_log_id,ingredient_name,weight,calories,protein,carbs,sugar,fat,counts_as_added_sugar) VALUES (?,?,?,?,?,?,?,?,?)", [(log_id, i.name, i.weight, *(getattr(i, k) for k in ("calories", "protein", "carbs", "sugar", "fat")), int(i.counts_as_added_sugar)) for i in payload.items])
     return {"id": log_id}
 
 
@@ -239,7 +245,7 @@ def update_log(log_id: int, payload: LogIn):
         if not db.execute("SELECT 1 FROM daily_logs WHERE id=?", (log_id,)).fetchone(): raise HTTPException(404, "Log not found")
         db.execute("UPDATE daily_logs SET user_id=?,date=?,meal_type=?,total_calories=?,total_protein=?,total_carbs=?,total_sugar=?,total_fat=? WHERE id=?", (payload.user_id, payload.date, payload.meal_type, *(totals[k] for k in ("calories", "protein", "carbs", "sugar", "fat")), log_id))
         db.execute("DELETE FROM daily_log_items WHERE daily_log_id=?", (log_id,))
-        db.executemany("INSERT INTO daily_log_items(daily_log_id,ingredient_name,weight,calories,protein,carbs,sugar,fat) VALUES (?,?,?,?,?,?,?,?)", [(log_id, i.name, i.weight, *(getattr(i, k) for k in ("calories", "protein", "carbs", "sugar", "fat"))) for i in payload.items])
+        db.executemany("INSERT INTO daily_log_items(daily_log_id,ingredient_name,weight,calories,protein,carbs,sugar,fat,counts_as_added_sugar) VALUES (?,?,?,?,?,?,?,?,?)", [(log_id, i.name, i.weight, *(getattr(i, k) for k in ("calories", "protein", "carbs", "sugar", "fat")), int(i.counts_as_added_sugar)) for i in payload.items])
     return {"id": log_id}
 
 
@@ -250,7 +256,7 @@ def duplicate_log(log_id: int, user_id: int):
         if not source: raise HTTPException(404, "Log not found")
         items = db.execute("SELECT * FROM daily_log_items WHERE daily_log_id=?", (log_id,)).fetchall()
         cur = db.execute("INSERT INTO daily_logs(user_id,date,meal_type,total_calories,total_protein,total_carbs,total_sugar,total_fat) VALUES (?,?,?,?,?,?,?,?)", (user_id, source["date"], source["meal_type"], *(source[f"total_{k}"] for k in ("calories", "protein", "carbs", "sugar", "fat"))))
-        db.executemany("INSERT INTO daily_log_items(daily_log_id,ingredient_name,weight,calories,protein,carbs,sugar,fat) VALUES (?,?,?,?,?,?,?,?)", [(cur.lastrowid, i["ingredient_name"], i["weight"], *(i[k] for k in ("calories", "protein", "carbs", "sugar", "fat"))) for i in items])
+        db.executemany("INSERT INTO daily_log_items(daily_log_id,ingredient_name,weight,calories,protein,carbs,sugar,fat,counts_as_added_sugar) VALUES (?,?,?,?,?,?,?,?,?)", [(cur.lastrowid, i["ingredient_name"], i["weight"], *(i[k] for k in ("calories", "protein", "carbs", "sugar", "fat")), i["counts_as_added_sugar"]) for i in items])
     return {"id": cur.lastrowid}
 
 
